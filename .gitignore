@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.ofsync/
+*.log
+.env
+.integration-readonly/
