@@ -119,6 +119,39 @@ test("first synchronization downloads remote files and writes a baseline", async
   assert.equal((await fixture.store.loadState()).files["main.tex"].kind, "doc");
 });
 
+test("skips Git data, ignored paths, and LaTeX build products", async (context) => {
+  const fixture = await setup({
+    "main.tex": "remote-main",
+    ".git/config": "remote-git-data",
+    "ai-output/remote.md": "remote-ai-output",
+    "private-notes/remote.md": "remote-private-note",
+    "remote-build.aux": "remote-build-output",
+  });
+  context.after(() => cleanup(fixture.directory));
+  await fs.writeFile(path.join(fixture.directory, ".gitignore"), "ai-output/\n");
+  await fs.writeFile(path.join(fixture.directory, ".ofsyncignore"), "private-notes/\n");
+  await fs.mkdir(path.join(fixture.directory, ".git"), { recursive: true });
+  await fs.mkdir(path.join(fixture.directory, "ai-output"), { recursive: true });
+  await fs.mkdir(path.join(fixture.directory, "private-notes"), { recursive: true });
+  await fs.writeFile(path.join(fixture.directory, ".git", "config"), "local-git-data");
+  await fs.writeFile(path.join(fixture.directory, "ai-output", "local.md"), "local-ai-output");
+  await fs.writeFile(path.join(fixture.directory, "private-notes", "local.md"), "local-private-note");
+  await fs.writeFile(path.join(fixture.directory, "local-build.aux"), "local-build-output");
+
+  const summary = await fixture.engine.syncAll();
+  const state = await fixture.store.loadState();
+
+  assert.deepEqual(summary.downloaded, ["main.tex"]);
+  assert.equal(await fs.readFile(path.join(fixture.directory, "main.tex"), "utf8"), "remote-main");
+  assert.equal(fixture.remote.files.has("local-build.aux"), false);
+  assert.equal(fixture.remote.files.has("ai-output/local.md"), false);
+  assert.equal(fixture.remote.files.has("private-notes/local.md"), false);
+  assert.equal(state.files[".git/config"], undefined);
+  assert.equal(state.files["remote-build.aux"], undefined);
+  assert.equal(state.files["ai-output/remote.md"], undefined);
+  assert.equal(state.files["private-notes/remote.md"], undefined);
+});
+
 test("a local-only edit uploads without downloading the remote file", async (context) => {
   const fixture = await setup({ "main.tex": "base" });
   context.after(() => cleanup(fixture.directory));

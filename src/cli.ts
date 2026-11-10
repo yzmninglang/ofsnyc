@@ -8,6 +8,7 @@ import { loadRuntime } from "./runtime.js";
 import { StateStore } from "./state-store.js";
 import type { SyncConfig } from "./types.js";
 import { CompileScheduler } from "./sync/compile-scheduler.js";
+import { ProjectPathFilter } from "./sync/path-filter.js";
 import { SyncEngine } from "./sync/sync-engine.js";
 import { LocalWatcher } from "./watcher/local-watcher.js";
 import { RemoteMonitor } from "./watcher/remote-monitor.js";
@@ -97,6 +98,7 @@ async function initialize(args: ParsedArguments): Promise<void> {
     remotePollIntervalMs: positiveInteger(args.values.get("remote-poll-ms") ?? "3000", "remote-poll-ms"),
     localDebounceMs: positiveInteger(args.values.get("local-debounce-ms") ?? "750", "local-debounce-ms"),
     propagateDeletes: args.flags.has("propagate-deletes"),
+    respectGitignore: !args.flags.has("no-gitignore"),
   };
   const store = new StateStore(directory);
   await store.initialize(config);
@@ -155,6 +157,7 @@ async function watchProject(args: ParsedArguments): Promise<void> {
     onPathsChanged: async (paths) => {
       await runtime.engine.syncPaths(paths);
     },
+    ignores: async (relativePath) => (await ProjectPathFilter.load(runtime.store.projectDirectory, runtime.config)).ignores(relativePath),
     onError: logError,
   });
   const remoteMonitor = new RemoteMonitor(runtime.client, runtime.store, runtime.engine, {

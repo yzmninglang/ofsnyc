@@ -4,15 +4,27 @@
   "private": true,
   "description": "A local-first ShareLaTeX synchronization daemon.",
   "type": "module",
-  "bin": { "ofsync": "dist/cli.js" },
+  "bin": {
+    "ofsync": "dist/cli.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit -p tsconfig.json",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
-    "test": "npm run build && node --test dist/tests/reconcile.test.js dist/tests/realtime-tree.test.js dist/tests/remote-monitor.test.js dist/tests/sharelatex-client.test.js dist/tests/state-store.test.js dist/tests/sync-engine.test.js"
+    "test": "npm run build && node --test dist/tests/path-filter.test.js dist/tests/reconcile.test.js dist/tests/realtime-tree.test.js dist/tests/remote-monitor.test.js dist/tests/sharelatex-client.test.js dist/tests/state-store.test.js dist/tests/sync-engine.test.js"
   },
-  "engines": { "node": ">=22.0.0" },
-  "dependencies": { "chokidar": "^4.0.3", "fastify": "^5.3.2" },
-  "devDependencies": { "@types/node": "^22.15.3", "tsx": "^4.19.3", "typescript": "^5.8.3" }
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "fastify": "^5.3.2",
+    "ignore": "^7.0.14"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3"
+  }
 }

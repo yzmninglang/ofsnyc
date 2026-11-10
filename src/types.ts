@@ -32,6 +32,8 @@ export interface SyncConfig {
   remotePollIntervalMs: number;
   localDebounceMs: number;
   propagateDeletes: boolean;
+  respectGitignore?: boolean;
+  ignorePatterns?: string[];
 }
 
 export interface FileBaseline {

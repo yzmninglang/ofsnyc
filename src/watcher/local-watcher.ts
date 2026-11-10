@@ -1,11 +1,13 @@
 import path from "node:path";
 import { watch, type FSWatcher } from "chokidar";
-import { isControlPath, toRemotePath } from "../util/paths.js";
+import { isAlwaysIgnoredPath } from "../sync/path-filter.js";
+import { toRemotePath } from "../util/paths.js";
 
 export interface LocalWatcherOptions {
   projectDirectory: string;
   debounceMs: number;
   onPathsChanged: (paths: string[]) => Promise<void> | void;
+  ignores?: (relativePath: string) => Promise<boolean>;
   onError?: (error: Error) => void;
 }
 
@@ -49,8 +51,14 @@ export class LocalWatcher {
   }
 
   private record(filePath: string): void {
+    void this.recordAsync(filePath).catch((error: unknown) => {
+      this.options.onError?.(error instanceof Error ? error : new Error(String(error)));
+    });
+  }
+
+  private async recordAsync(filePath: string): Promise<void> {
     const relativePath = toRemotePath(path.relative(this.options.projectDirectory, filePath));
-    if (!relativePath || isControlPath(relativePath)) {
+    if (isAlwaysIgnoredPath(relativePath) || await this.options.ignores?.(relativePath)) {
       return;
     }
     this.changedPaths.add(relativePath);
@@ -69,6 +77,6 @@ export class LocalWatcher {
 
   private isIgnored(filePath: string): boolean {
     const relativePath = toRemotePath(path.relative(this.options.projectDirectory, filePath));
-    return isControlPath(relativePath);
+    return isAlwaysIgnoredPath(relativePath);
   }
 }

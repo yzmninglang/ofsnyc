@@ -7,6 +7,7 @@ import { hashContent } from "../util/hash.js";
 import { isControlPath, toLocalPath, toRemotePath } from "../util/paths.js";
 import type { ShareLatexRemoteClient } from "../remote/client.js";
 import { reconcileFile } from "./reconcile.js";
+import { ProjectPathFilter, type SyncPathFilter } from "./path-filter.js";
 
 export interface SyncSummary {
   downloaded: string[];
@@ -190,10 +191,11 @@ export class SyncEngine extends EventEmitter {
     this.emitStatus();
     const summary: SyncSummary = { downloaded: [], uploaded: [], conflicted: [], ignored: [], unchanged: [] };
     try {
+      const pathFilter = await ProjectPathFilter.load(this.store.projectDirectory, this.config);
       const [tree, state, localPaths] = await Promise.all([
         this.client.getProjectTree(this.config.projectId),
         this.store.loadState(),
-        requestedPaths === undefined ? this.listLocalPaths() : Promise.resolve(new Set<string>()),
+        requestedPaths === undefined ? this.listLocalPaths(pathFilter) : Promise.resolve(new Set<string>()),
       ]);
       let remoteChangedPaths: Set<string> | undefined;
       if (state.remoteVersion !== undefined) {
@@ -207,14 +209,15 @@ export class SyncEngine extends EventEmitter {
           remoteChangedPaths = undefined;
         }
       }
-      const paths = requestedPaths ?? new Set<string>([...tree.files.keys(), ...Object.keys(state.files), ...localPaths]);
-      for (const filePath of paths) {
+      const candidates = requestedPaths ?? new Set<string>([...tree.files.keys(), ...Object.keys(state.files), ...localPaths]);
+      const paths = new Set([...candidates].filter((filePath) => !pathFilter.ignores(filePath)));
+      for (const filePath of candidates) {
         this.pendingPaths.delete(filePath);
       }
       const existingConflicts = new Set((await this.store.listConflicts()).map((conflict) => conflict.path));
 
       for (const relativePath of [...paths].filter((item) => !isControlPath(item)).sort()) {
-        await this.syncPath(relativePath, tree, state, summary, existingConflicts, remoteChangedPaths, requestedPaths);
+        await this.syncPath(relativePath, tree, state, summary, existingConflicts, remoteChangedPaths, requestedPaths, pathFilter);
       }
 
       state.lastSyncAt = new Date().toISOString();
@@ -250,7 +253,12 @@ export class SyncEngine extends EventEmitter {
     existingConflicts: Set<string>,
     remoteChangedPaths?: Set<string>,
     requestedPaths?: Set<string>,
+    pathFilter?: SyncPathFilter,
   ): Promise<void> {
+    if (pathFilter?.ignores(relativePath)) {
+      summary.ignored.push(relativePath);
+      return;
+    }
     const localPath = toLocalPath(this.store.projectDirectory, relativePath);
     const localContent = await this.readLocalFile(localPath);
     const remoteFile = tree.files.get(relativePath);
@@ -338,7 +346,7 @@ export class SyncEngine extends EventEmitter {
     summary.uploaded.push(relativePath);
   }
 
-  private async listLocalPaths(): Promise<Set<string>> {
+  private async listLocalPaths(pathFilter: SyncPathFilter): Promise<Set<string>> {
     const paths = new Set<string>();
     const walk = async (directory: string, prefix: string): Promise<void> => {
       let entries: Dirent<string>[];
@@ -352,7 +360,7 @@ export class SyncEngine extends EventEmitter {
       }
       for (const entry of entries) {
         const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
-        if (isControlPath(relativePath) || entry.isSymbolicLink()) {
+        if (pathFilter.ignores(relativePath) || entry.isSymbolicLink()) {
           continue;
         }
         const absolutePath = path.join(directory, entry.name);

@@ -35,6 +35,9 @@ For each path, the daemon compares the current local bytes, current remote bytes
 - both changed: keep snapshots and report a conflict;
 - new file on one side: copy it to the other side;
 - deletions: are not propagated unless explicitly enabled in config.
+- The .git/ and .ofsync/ directories are always excluded. By default, .gitignore and optional .ofsyncignore files also exclude paths from both upload and download; common LaTeX build products such as *.aux, *.log, and *.synctex.gz are excluded automatically.
+
+Use .ofsyncignore for files that should remain in Git but must never be synchronized to ShareLaTeX. The .gitignore and .ofsyncignore files themselves remain eligible for synchronization. Pass --no-gitignore during init to stop reading .gitignore; hard safety exclusions and .ofsyncignore still apply.
 
 The first MVP deliberately does not silently auto-merge text or send OT edits. It favors retained snapshots and explicit conflict resolution.
 
