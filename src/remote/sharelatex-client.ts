@@ -36,6 +36,28 @@ export interface CompileResult {
 
 export class ShareLatexError extends Error {}
 
+const MAX_UPLOAD_RATE_LIMIT_RETRIES = 6;
+const MAX_UPLOAD_RATE_LIMIT_DELAY_MS = 10_000;
+
+function retryAfterMilliseconds(response: Response, attempt: number): number {
+  const retryAfter = response.headers.get("retry-after");
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(Math.round(seconds * 1_000), MAX_UPLOAD_RATE_LIMIT_DELAY_MS);
+    }
+    const timestamp = Date.parse(retryAfter);
+    if (!Number.isNaN(timestamp)) {
+      return Math.min(Math.max(0, timestamp - Date.now()), MAX_UPLOAD_RATE_LIMIT_DELAY_MS);
+    }
+  }
+  return Math.min(1_000 * (2 ** attempt), MAX_UPLOAD_RATE_LIMIT_DELAY_MS);
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 function normalizeServerUrl(serverUrl: string): string {
   const url = new URL(serverUrl);
   url.pathname = url.pathname.replace(/\/$/, "");
@@ -238,22 +260,31 @@ export class ShareLatexClient {
     const parentFolderId = await this.ensureParentFolder(projectId, tree, safePath);
     const filename = safePath.split("/").at(-1)!;
     const existing = tree.files.get(safePath);
-    const url = new URL(`/project/${encodeURIComponent(projectId)}/upload`, `${this.serverUrl}/`);
-    url.searchParams.set("folder_id", parentFolderId);
-    url.searchParams.set("_csrf", this.requireCsrf());
-    url.searchParams.set("qquuid", randomUUID());
-    url.searchParams.set("qqfilename", filename);
-    url.searchParams.set("qqtotalfilesize", String(content.byteLength));
-    const form = new FormData();
-    form.set("targetFolderId", parentFolderId);
-    form.set("name", filename);
-    form.set("type", textFileExtension(safePath) ? "text/plain" : "application/octet-stream");
-    const blobContent = new Uint8Array(content.byteLength);
-    blobContent.set(content);
-    form.set("qqfile", new Blob([blobContent.buffer]), filename);
-    const response = await this.requestUrl(url, { method: "POST", headers: this.csrfHeaders(), body: form });
-    if (!response.ok) {
-      throw new ShareLatexError(`Could not upload ${safePath}: HTTP ${response.status}`);
+    let response: Response | undefined;
+
+    for (let attempt = 0; attempt <= MAX_UPLOAD_RATE_LIMIT_RETRIES; attempt += 1) {
+      const url = new URL(`/project/${encodeURIComponent(projectId)}/upload`, `${this.serverUrl}/`);
+      url.searchParams.set("folder_id", parentFolderId);
+      url.searchParams.set("_csrf", this.requireCsrf());
+      url.searchParams.set("qquuid", randomUUID());
+      url.searchParams.set("qqfilename", filename);
+      url.searchParams.set("qqtotalfilesize", String(content.byteLength));
+      const form = new FormData();
+      form.set("targetFolderId", parentFolderId);
+      form.set("name", filename);
+      form.set("type", textFileExtension(safePath) ? "text/plain" : "application/octet-stream");
+      const blobContent = new Uint8Array(content.byteLength);
+      blobContent.set(content);
+      form.set("qqfile", new Blob([blobContent.buffer]), filename);
+      response = await this.requestUrl(url, { method: "POST", headers: this.csrfHeaders(), body: form });
+      if (response.status !== 429 || attempt === MAX_UPLOAD_RATE_LIMIT_RETRIES) {
+        break;
+      }
+      await wait(retryAfterMilliseconds(response, attempt));
+    }
+
+    if (!response?.ok) {
+      throw new ShareLatexError(`Could not upload ${safePath}: HTTP ${response?.status ?? "no response"}`);
     }
     const body = (await response.json()) as { success?: boolean; entity_id?: string; entity_type?: string; error?: string };
     if (!body.success) {
