@@ -311,6 +311,66 @@ test("rejects a compiled PDF download that is not a PDF", async () => {
   });
 });
 
+test("only sends an explicit root document path to the compile API", async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  await withServer(async (request, response) => {
+    const url = new URL(request.url ?? "/", "http://mock.test");
+    if (request.method === "GET" && url.pathname === "/project") {
+      response.writeHead(200, { "Content-Type": "text/html" });
+      response.end(projectDashboard());
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/project/project-1/compile") {
+      bodies.push(JSON.parse(await readBody(request)) as Record<string, unknown>);
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        status: "success",
+        outputFiles: [{ type: "pdf", path: "output.pdf", url: "/project/project-1/build/build-123/output/output.pdf" }],
+      }));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/project/project-1/build/build-123/output/output.pdf") {
+      response.writeHead(200, { "Content-Type": "application/pdf" });
+      response.end("%PDF-1.4\ncompiled-pdf");
+      return;
+    }
+    assert.fail(`Unexpected request: ${request.method} ${url.pathname}`);
+  }, async (serverUrl) => {
+    const client = new ShareLatexClient(serverUrl, { cookie: "overleaf.sid=browser-session" });
+    await client.authenticate();
+
+    await client.compile("project-1");
+    await client.compile("project-1", "main.tex");
+
+    // Overleaf rejects a null root document path, so the key must be omitted.
+    assert.equal("rootResourcePath" in bodies[0], false);
+    assert.equal(bodies[1].rootResourcePath, "main.tex");
+  });
+});
+
+test("retries a request after a connect timeout", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    if (calls === 1) {
+      const error = new TypeError("fetch failed") as TypeError & { cause?: { code: string } };
+      error.cause = { code: "UND_ERR_CONNECT_TIMEOUT" };
+      throw error;
+    }
+    return new Response(projectDashboard(), { status: 200, headers: { "Content-Type": "text/html" } });
+  }) as typeof fetch;
+  try {
+    const client = new ShareLatexClient("http://overleaf.test", { cookie: "overleaf.sid=browser-session" });
+    await client.authenticate();
+
+    assert.equal(calls, 2);
+    assert.equal(client.authenticated, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 function diffHandler(
   versions: (from: string | null, to: string | null) => { status: number; body?: unknown },
 ): (request: IncomingMessage, response: ServerResponse) => void {

@@ -1,8 +1,14 @@
 #!/usr/bin/env node
 
+import { spawn } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
 import { startLocalServer } from "./api/local-server.js";
+import { startManagerServer } from "./api/manager-server.js";
+import { CredentialStore } from "./manager/credentials.js";
+import { ProjectManager } from "./manager/project-manager.js";
+import { ManagerRegistry } from "./manager/registry.js";
+import { RequestLogger } from "./request-logger.js";
 import { ShareLatexClient } from "./remote/sharelatex-client.js";
 import { loadRuntime } from "./runtime.js";
 import { StateStore } from "./state-store.js";
@@ -25,6 +31,7 @@ function usage(): string {
   ofsync init --server URL --project-name NAME --path DIRECTORY [--cookie-env NAME] [--email-env NAME --password-env NAME]
   ofsync sync --path DIRECTORY [--request-log]
   ofsync watch --path DIRECTORY [--port 43821] [--request-log]
+  ofsync ui [--port 43821] [--request-log]
   ofsync status --path DIRECTORY
   ofsync resolve --path DIRECTORY --id CONFLICT_ID --choice local|remote
 
@@ -186,6 +193,56 @@ async function watchProject(args: ParsedArguments): Promise<void> {
   });
 }
 
+function openBrowser(url: string): void {
+  const [command, args] = process.platform === "win32"
+    ? ["cmd", ["/c", "start", "", url]]
+    : process.platform === "darwin"
+      ? ["open", [url]]
+      : ["xdg-open", [url]];
+  try {
+    const child = spawn(command, args, { detached: true, stdio: "ignore" });
+    child.on("error", () => undefined);
+    child.unref();
+  } catch {
+    // Opening the browser is best-effort; the URL is printed regardless.
+  }
+}
+
+async function runManager(args: ParsedArguments): Promise<void> {
+  const port = positiveInteger(args.values.get("port") ?? "43821", "port");
+  if (port > 65_535) {
+    throw new Error("--port must be a valid TCP port");
+  }
+  const requestLogging = args.flags.has("request-log");
+  const logError = (error: Error) => console.error(`[ofsync] ${error.message}`);
+  const registry = new ManagerRegistry();
+  const managerLogPath = requestLogging ? path.join(path.dirname(registry.filePath), "manager-requests.log") : undefined;
+  const manager = new ProjectManager(registry, new CredentialStore(), new RequestLogger(), {
+    requestLogging,
+    onError: (message) => logError(new Error(message)),
+  });
+  await manager.initialize();
+  const server = await startManagerServer({
+    manager,
+    port,
+    requestLogger: new RequestLogger(managerLogPath),
+  });
+  const url = `http://127.0.0.1:${port}`;
+  console.log(`ofsync manager is running at ${url}`);
+  console.log(`Project mappings: ${registry.filePath}`);
+  openBrowser(url);
+
+  const shutdown = async () => {
+    await manager.stopAll();
+    await server.close();
+  };
+  await new Promise<void>((resolve) => {
+    const stop = () => void shutdown().finally(resolve);
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
+}
+
 async function main(): Promise<void> {
   const args = parseArguments(process.argv.slice(2));
   switch (args.command) {
@@ -200,6 +257,9 @@ async function main(): Promise<void> {
       return;
     case "watch":
       await watchProject(args);
+      return;
+    case "ui":
+      await runManager(args);
       return;
     case "status":
       await showStatus(args);

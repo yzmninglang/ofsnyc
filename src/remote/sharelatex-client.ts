@@ -60,6 +60,13 @@ function buildIdFromOutputFiles(outputFiles: Array<{ url: string }>): string | u
 
 const MAX_UPLOAD_RATE_LIMIT_RETRIES = 6;
 const MAX_UPLOAD_RATE_LIMIT_DELAY_MS = 10_000;
+const CONNECT_RETRY_ATTEMPTS = 3;
+const CONNECT_RETRY_DELAY_MS = 500;
+
+function isConnectTimeout(error: unknown): boolean {
+  const cause = (error as { cause?: { code?: unknown } } | undefined)?.cause;
+  return cause?.code === "UND_ERR_CONNECT_TIMEOUT";
+}
 
 function retryAfterMilliseconds(response: Response, attempt: number): number {
   const retryAfter = response.headers.get("retry-after");
@@ -80,7 +87,7 @@ function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function normalizeServerUrl(serverUrl: string): string {
+export function normalizeServerUrl(serverUrl: string): string {
   const url = new URL(serverUrl);
   url.pathname = url.pathname.replace(/\/$/, "");
   return url.toString().replace(/\/$/, "");
@@ -370,17 +377,23 @@ export class ShareLatexClient {
   }
 
   async compile(projectId: string, rootResourcePath: string | null = null): Promise<CompileResult> {
+    const body: Record<string, unknown> = {
+      _csrf: this.requireCsrf(),
+      check: "silent",
+      draft: false,
+      incrementalCompilesEnabled: true,
+      stopOnFirstError: false,
+    };
+    // Newer Overleaf rejects a null root document
+    // ("Invalid input: expected string, received null"), while older
+    // ShareLaTeX treats an omitted value as "detect the root document".
+    if (rootResourcePath !== null) {
+      body.rootResourcePath = rootResourcePath;
+    }
     const response = await this.request(`/project/${encodeURIComponent(projectId)}/compile?auto_compile=true`, {
       method: "POST",
       headers: this.csrfHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({
-        _csrf: this.requireCsrf(),
-        check: "silent",
-        draft: false,
-        incrementalCompilesEnabled: true,
-        rootResourcePath,
-        stopOnFirstError: false,
-      }),
+      body: JSON.stringify(body),
     });
     if (!response.ok) {
       throw new ShareLatexError(`Remote compile failed with HTTP ${response.status}`);
@@ -626,28 +639,37 @@ export class ShareLatexClient {
     }
     headers.set("Connection", "keep-alive");
     const startedAt = Date.now();
-    try {
-      const response = await fetch(url, { ...init, headers, redirect: init.redirect ?? "manual" });
-      this.cookie = mergeCookieHeaders(this.cookie, extractCookies(response));
-      this.requestLogger?.record({
-        at: new Date().toISOString(),
-        scope: "remote",
-        method: init.method ?? "GET",
-        url: sanitizeRequestUrl(url),
-        status: response.status,
-        durationMs: Date.now() - startedAt,
-      });
-      return response;
-    } catch (error) {
-      this.requestLogger?.record({
-        at: new Date().toISOString(),
-        scope: "remote",
-        method: init.method ?? "GET",
-        url: sanitizeRequestUrl(url),
-        durationMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      throw error;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        const response = await fetch(url, { ...init, headers, redirect: init.redirect ?? "manual" });
+        this.cookie = mergeCookieHeaders(this.cookie, extractCookies(response));
+        this.requestLogger?.record({
+          at: new Date().toISOString(),
+          scope: "remote",
+          method: init.method ?? "GET",
+          url: sanitizeRequestUrl(url),
+          status: response.status,
+          durationMs: Date.now() - startedAt,
+        });
+        return response;
+      } catch (error) {
+        this.requestLogger?.record({
+          at: new Date().toISOString(),
+          scope: "remote",
+          method: init.method ?? "GET",
+          url: sanitizeRequestUrl(url),
+          durationMs: Date.now() - startedAt,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        // Hosted Overleaf occasionally drops the first TCP connection after an
+        // idle period. A connect timeout happens before the request is sent,
+        // so retrying cannot duplicate a write.
+        if (attempt < CONNECT_RETRY_ATTEMPTS && isConnectTimeout(error)) {
+          await wait(CONNECT_RETRY_DELAY_MS * attempt);
+          continue;
+        }
+        throw error;
+      }
     }
   }
 
