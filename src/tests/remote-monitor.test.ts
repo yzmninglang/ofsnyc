@@ -47,12 +47,24 @@ test("falls back to full scans without repeatedly probing an unsupported history
   await store.initialize(config());
   const client = new UnsupportedHistoryClient();
   const engine = new RecordingEngine();
-  const monitor = new RemoteMonitor(client as never, store, engine as never, { intervalMs: 60_000 });
+  const monitor = new RemoteMonitor(client as never, store, engine as never, {
+    intervalMs: 60_000,
+    fullScanIntervalMs: 60_000,
+  });
+  const tick = () => (monitor as unknown as { tick(): Promise<void> }).tick();
 
   await monitor.start();
   monitor.stop();
-  await (monitor as unknown as { tick(): Promise<void> }).tick();
+  // The probe after the first full scan fails again, but the backoff window
+  // must suppress the next full scan instead of downloading every remote file.
+  await tick();
+  assert.equal(client.calls, 2);
+  assert.equal(engine.fullSyncs, 1);
 
-  assert.equal(client.calls, 1);
-  assert.equal(engine.fullSyncs, 2);
+  // Once the history API is known to be unavailable, ticks inside the backoff
+  // window do not even probe it.
+  await tick();
+  assert.equal(client.calls, 2);
+  assert.equal(engine.fullSyncs, 1);
 });
+

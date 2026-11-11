@@ -225,7 +225,7 @@ test("extracts the Build ID for a downloaded compiled PDF", async () => {
     }
     if (request.method === "GET" && url.pathname === "/project/project-1/build/build-123/output/output.pdf") {
       response.writeHead(200, { "Content-Type": "application/pdf" });
-      response.end("compiled-pdf");
+      response.end("%PDF-1.4\ncompiled-pdf");
       return;
     }
     assert.fail("Unexpected request");
@@ -236,7 +236,218 @@ test("extracts the Build ID for a downloaded compiled PDF", async () => {
     const result = await client.compile("project-1");
 
     assert.equal(result.buildId, "build-123");
-    assert.equal(new TextDecoder().decode(result.pdf), "compiled-pdf");
+    assert.equal(new TextDecoder().decode(result.pdf), "%PDF-1.4\ncompiled-pdf");
+  });
+});
+
+test("downloads output.pdf instead of another pdf listed in the build output", async () => {
+  const downloads: string[] = [];
+  await withServer(async (request, response) => {
+    const url = new URL(request.url ?? "/", "http://mock.test");
+    if (request.method === "GET" && url.pathname === "/project") {
+      response.writeHead(200, { "Content-Type": "text/html" });
+      response.end(projectDashboard());
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/project/project-1/compile") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        status: "success",
+        outputFiles: [
+          { type: "pdf", path: "leftover.pdf", url: "/project/project-1/build/build-123/output/leftover.pdf" },
+          { type: "pdf", path: "output.pdf", url: "/project/project-1/build/build-123/output/output.pdf" },
+        ],
+      }));
+      return;
+    }
+    if (request.method === "GET" && url.pathname.startsWith("/project/project-1/build/build-123/output/")) {
+      downloads.push(url.pathname);
+      response.writeHead(200, { "Content-Type": "application/pdf" });
+      response.end(url.pathname.endsWith("/output.pdf") ? "%PDF-1.4\nreal-pdf" : "%PDF-1.4\nempty");
+      return;
+    }
+    assert.fail(`Unexpected request: ${request.method} ${url.pathname}`);
+  }, async (serverUrl) => {
+    const client = new ShareLatexClient(serverUrl, { cookie: "overleaf.sid=browser-session" });
+    await client.authenticate();
+
+    const result = await client.compile("project-1");
+
+    assert.equal(result.pdfPath, "output.pdf");
+    assert.equal(new TextDecoder().decode(result.pdf), "%PDF-1.4\nreal-pdf");
+    assert.deepEqual(downloads, ["/project/project-1/build/build-123/output/output.pdf"]);
+  });
+});
+
+test("rejects a compiled PDF download that is not a PDF", async () => {
+  await withServer(async (request, response) => {
+    const url = new URL(request.url ?? "/", "http://mock.test");
+    if (request.method === "GET" && url.pathname === "/project") {
+      response.writeHead(200, { "Content-Type": "text/html" });
+      response.end(projectDashboard());
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/project/project-1/compile") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        status: "success",
+        outputFiles: [
+          { type: "pdf", path: "output.pdf", url: "/project/project-1/build/build-123/output/output.pdf" },
+        ],
+      }));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/project/project-1/build/build-123/output/output.pdf") {
+      response.writeHead(200, { "Content-Type": "text/html" });
+      response.end("<html>error page</html>");
+      return;
+    }
+    assert.fail(`Unexpected request: ${request.method} ${url.pathname}`);
+  }, async (serverUrl) => {
+    const client = new ShareLatexClient(serverUrl, { cookie: "overleaf.sid=browser-session" });
+    await client.authenticate();
+
+    await assert.rejects(() => client.compile("project-1"), /did not return a PDF file/);
+  });
+});
+
+function diffHandler(
+  versions: (from: string | null, to: string | null) => { status: number; body?: unknown },
+): (request: IncomingMessage, response: ServerResponse) => void {
+  return (request, response) => {
+    const url = new URL(request.url ?? "/", "http://mock.test");
+    if (request.method === "GET" && url.pathname === "/project") {
+      response.writeHead(200, { "Content-Type": "text/html" });
+      response.end(projectDashboard());
+      return;
+    }
+    if (url.pathname === "/project/project-1/filetree/diff") {
+      const result = versions(url.searchParams.get("from"), url.searchParams.get("to"));
+      response.writeHead(result.status, { "Content-Type": "application/json" });
+      response.end(result.body === undefined ? "" : JSON.stringify(result.body));
+      return;
+    }
+    assert.fail(`Unexpected request: ${request.method} ${url.pathname}`);
+  };
+}
+
+test("treats a missing newer version as unchanged when the current version still exists", async () => {
+  const probes: string[] = [];
+  const handler = diffHandler((from, to) => {
+    probes.push(`${from}->${to}`);
+    return from === to && from === "7" ? { status: 200, body: { diff: [] } } : { status: 500 };
+  });
+  await withServer(handler, async (serverUrl) => {
+    const client = new ShareLatexClient(serverUrl, { cookie: "overleaf.sid=browser-session" });
+    await client.authenticate();
+
+    const changes = await client.getRemoteChanges("project-1", 7);
+
+    assert.deepEqual(changes, { version: 7, paths: new Set() });
+    assert.deepEqual(probes, ["8->8", "7->7"]);
+  });
+});
+
+test("reports unavailable history when neither the next nor the known version exists", async () => {
+  const handler = diffHandler(() => ({ status: 500 }));
+  await withServer(handler, async (serverUrl) => {
+    const client = new ShareLatexClient(serverUrl, { cookie: "overleaf.sid=browser-session" });
+    await client.authenticate();
+
+    assert.equal(await client.getRemoteChanges("project-1", 7), undefined);
+  });
+});
+
+test("reports unavailable history when the endpoint rejects authentication", async () => {
+  const handler = diffHandler(() => ({ status: 401 }));
+  await withServer(handler, async (serverUrl) => {
+    const client = new ShareLatexClient(serverUrl, { cookie: "overleaf.sid=browser-session" });
+    await client.authenticate();
+
+    assert.equal(await client.getRemoteChanges("project-1", 7), undefined);
+  });
+});
+
+test("returns the paths changed between the known and current versions", async () => {
+  const handler = diffHandler((from, to) => {
+    if (from === to && from === "8") {
+      return { status: 200, body: { diff: [] } };
+    }
+    if (from === "7" && to === "8") {
+      return {
+        status: 200,
+        body: {
+          diff: [
+            { pathname: "main.tex", operation: "edited" },
+            { pathname: "old.tex", newPathname: "new.tex", operation: "renamed" },
+            { pathname: "gone.tex", operation: "removed" },
+          ],
+        },
+      };
+    }
+    return { status: 500 };
+  });
+  await withServer(handler, async (serverUrl) => {
+    const client = new ShareLatexClient(serverUrl, { cookie: "overleaf.sid=browser-session" });
+    await client.authenticate();
+
+    const changes = await client.getRemoteChanges("project-1", 7);
+
+    assert.equal(changes?.version, 8);
+    assert.deepEqual([...(changes?.paths ?? [])].sort(), ["gone.tex", "main.tex", "new.tex", "old.tex"]);
+  });
+});
+
+test("only treats operation-annotated entries as changed paths", async () => {
+  const handler = diffHandler((from, to) => {
+    if (from === to && from === "8") {
+      return { status: 200, body: { diff: [] } };
+    }
+    if (from === "7" && to === "8") {
+      return {
+        status: 200,
+        body: {
+          diff: [
+            { pathname: "IEEEtran.cls", editable: true },
+            { pathname: "fig1.png", editable: false },
+            { pathname: "sections/01-introduction.tex", operation: "edited", editable: true },
+            { pathname: "new.pdf", operation: "added", editable: false },
+            { pathname: "old.tex", newPathname: "renamed.tex", operation: "renamed", editable: true },
+          ],
+        },
+      };
+    }
+    return { status: 500 };
+  });
+  await withServer(handler, async (serverUrl) => {
+    const client = new ShareLatexClient(serverUrl, { cookie: "overleaf.sid=browser-session" });
+    await client.authenticate();
+
+    const changes = await client.getRemoteChanges("project-1", 7);
+
+    assert.equal(changes?.version, 8);
+    assert.deepEqual(
+      [...(changes?.paths ?? [])].sort(),
+      ["new.pdf", "old.tex", "renamed.tex", "sections/01-introduction.tex"],
+    );
+  });
+});
+
+test("reports unavailable history when a non-empty diff has no operation metadata", async () => {
+  const handler = diffHandler((from, to) => {
+    if (from === to && from === "8") {
+      return { status: 200, body: { diff: [] } };
+    }
+    if (from === "7" && to === "8") {
+      return { status: 200, body: { diff: [{ pathname: "IEEEtran.cls", editable: true }] } };
+    }
+    return { status: 500 };
+  });
+  await withServer(handler, async (serverUrl) => {
+    const client = new ShareLatexClient(serverUrl, { cookie: "overleaf.sid=browser-session" });
+    await client.authenticate();
+
+    assert.equal(await client.getRemoteChanges("project-1", 7), undefined);
   });
 });
 

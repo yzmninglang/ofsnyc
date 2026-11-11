@@ -2,8 +2,16 @@ import { StateStore } from "../state-store.js";
 import { ShareLatexClient } from "../remote/sharelatex-client.js";
 import { SyncEngine } from "../sync/sync-engine.js";
 
+export const DEFAULT_FULL_SCAN_INTERVAL_MS = 30_000;
+
 export interface RemoteMonitorOptions {
   intervalMs: number;
+  /**
+   * Minimum spacing between the expensive full scans used when the history API
+   * is unavailable. Without this backoff every poll would re-download every
+   * remote file for comparison.
+   */
+  fullScanIntervalMs?: number;
   onError?: (error: Error) => void;
 }
 
@@ -11,6 +19,7 @@ export class RemoteMonitor {
   private timer?: NodeJS.Timeout;
   private active = false;
   private historyUnavailable = false;
+  private lastFullScanAt?: number;
 
   constructor(
     private readonly client: ShareLatexClient,
@@ -43,7 +52,11 @@ export class RemoteMonitor {
       const config = await this.store.loadConfig();
       const state = await this.store.loadState();
       if (this.historyUnavailable) {
-        await this.engine.syncAll();
+        if (await this.runFullScanIfDue()) {
+          // Retry the history endpoint after a scan; a transient failure must
+          // not pin the monitor to full scans for the life of the process.
+          this.historyUnavailable = false;
+        }
         return;
       }
       if (state.remoteVersion === undefined) {
@@ -53,14 +66,18 @@ export class RemoteMonitor {
           await this.store.saveState(state);
         } else {
           this.historyUnavailable = true;
-          await this.engine.syncAll();
+          if (await this.runFullScanIfDue()) {
+            this.historyUnavailable = false;
+          }
         }
         return;
       }
       const changes = await this.client.getRemoteChanges(config.projectId, state.remoteVersion);
       if (!changes) {
         this.historyUnavailable = true;
-        await this.engine.syncAll();
+        if (await this.runFullScanIfDue()) {
+          this.historyUnavailable = false;
+        }
         return;
       }
       if (changes.version !== state.remoteVersion) {
@@ -72,12 +89,24 @@ export class RemoteMonitor {
     } catch (error) {
       this.options.onError?.(error instanceof Error ? error : new Error(String(error)));
       try {
-        await this.engine.syncAll();
+        await this.runFullScanIfDue();
       } catch (fallbackError) {
         this.options.onError?.(fallbackError instanceof Error ? fallbackError : new Error(String(fallbackError)));
       }
     } finally {
       this.active = false;
     }
+  }
+
+  /** Runs a full scan unless the backoff window has not elapsed yet. */
+  private async runFullScanIfDue(): Promise<boolean> {
+    const interval = this.options.fullScanIntervalMs ?? DEFAULT_FULL_SCAN_INTERVAL_MS;
+    const now = Date.now();
+    if (this.lastFullScanAt !== undefined && now - this.lastFullScanAt < interval) {
+      return false;
+    }
+    this.lastFullScanAt = now;
+    await this.engine.syncAll();
+    return true;
   }
 }

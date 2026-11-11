@@ -77,6 +77,12 @@ export class LocalWatcher {
 
   private isIgnored(filePath: string): boolean {
     const relativePath = toRemotePath(path.relative(this.options.projectDirectory, filePath));
+    // chokidar evaluates `ignored` for the watched root as well. The empty
+    // relative path must not be treated as a control path, or chokidar skips
+    // the whole project directory and no events are ever emitted.
+    if (!relativePath) {
+      return false;
+    }
     return isAlwaysIgnoredPath(relativePath);
   }
 }

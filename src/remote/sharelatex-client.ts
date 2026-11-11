@@ -345,8 +345,22 @@ export class ShareLatexClient {
     if (diff === undefined) {
       return undefined;
     }
+    if (diff.length === 0) {
+      return { version: nextVersion, paths: new Set() };
+    }
+    // ShareLaTeX answers with the complete file tree for every range and only
+    // annotates entries that actually changed with an `operation`. Treating
+    // every listed pathname as changed would re-download the whole project on
+    // each edit.
+    const changed = diff.filter((change) => change.operation !== undefined);
+    if (changed.length === 0) {
+      // Without operation metadata the diff cannot be trusted to name the
+      // changed paths, so let the caller fall back to a full scan rather than
+      // silently missing edits.
+      return undefined;
+    }
     const paths = new Set<string>();
-    for (const change of diff) {
+    for (const change of changed) {
       paths.add(change.pathname);
       if (change.newPathname) {
         paths.add(change.newPathname);
@@ -376,7 +390,17 @@ export class ShareLatexClient {
     if (raw.status !== "success") {
       return { outputFiles, raw };
     }
-    const pdf = outputFiles.find((file: { type?: string }) => file.type === "pdf") as { path: string; url: string } | undefined;
+    // ShareLaTeX lists every pdf in the build output, including project files
+    // copied alongside the compiled document. `output.pdf` is the compiled
+    // result; taking the first pdf entry can cache an unrelated (often empty)
+    // file, so prefer the canonical name and only then fall back.
+    const pdfFiles = outputFiles.filter(
+      (file: { type?: string; path?: string; url?: string }) =>
+        file.type === "pdf" && typeof file.path === "string" && typeof file.url === "string",
+    ) as Array<{ path: string; url: string }>;
+    const pdf = pdfFiles.find((file) => file.path === "output.pdf")
+      ?? pdfFiles.find((file) => /(^|\/)output\.pdf$/i.test(file.path))
+      ?? pdfFiles[0];
     if (!pdf) {
       return { outputFiles, raw };
     }
@@ -391,7 +415,13 @@ export class ShareLatexClient {
     if (!download.ok) {
       throw new ShareLatexError(`Could not download compiled PDF: HTTP ${download.status}`);
     }
-    return { pdf: new Uint8Array(await download.arrayBuffer()), pdfPath: pdf.path, buildId: buildIdFromOutputFiles(outputFiles), outputFiles, raw };
+    const bytes = new Uint8Array(await download.arrayBuffer());
+    if (bytes.length < 5 || bytes[0] !== 0x25 || bytes[1] !== 0x50 || bytes[2] !== 0x44 || bytes[3] !== 0x46) {
+      // Never cache a non-PDF body (an error page, empty build, ...) as the
+      // compiled result: the dashboard would serve an unopenable file.
+      throw new ShareLatexError("Compiled PDF download did not return a PDF file");
+    }
+    return { pdf: bytes, pdfPath: pdf.path, buildId: buildIdFromOutputFiles(outputFiles), outputFiles, raw };
   }
 
   async syncCode(projectId: string, file: string, line: number, column: number, buildId: string): Promise<unknown> {
@@ -455,29 +485,68 @@ export class ShareLatexClient {
   }
 
   private async findCurrentProjectVersion(projectId: string, knownVersion: number): Promise<number | undefined> {
-    const hasVersion = async (version: number): Promise<boolean | undefined> => (await this.getFileTreeDiff(projectId, version, version)) !== undefined;
+    const hasVersion = (version: number): Promise<boolean | undefined> => this.probeProjectVersion(projectId, version);
     const next = await hasVersion(knownVersion + 1);
     if (next === undefined) {
       return undefined;
     }
     if (!next) {
+      // A number of ShareLaTeX versions answer HTTP 500 for versions that do
+      // not exist, so a failed probe alone does not mean history is broken.
+      // Verify the endpoint still recognizes a version we know exists before
+      // concluding that the remote project has not changed.
+      const known = await hasVersion(knownVersion);
+      if (known !== true) {
+        return undefined;
+      }
       return knownVersion;
     }
     let lower = knownVersion + 1;
     let upper = Math.max(lower + 1, lower * 2);
-    while (await hasVersion(upper)) {
+    for (;;) {
+      const upperExists = await hasVersion(upper);
+      if (upperExists === undefined) {
+        return undefined;
+      }
+      if (!upperExists) {
+        break;
+      }
       lower = upper;
       upper *= 2;
     }
     while (lower + 1 < upper) {
       const middle = Math.floor((lower + upper) / 2);
-      if (await hasVersion(middle)) {
+      const middleExists = await hasVersion(middle);
+      if (middleExists === undefined) {
+        return undefined;
+      }
+      if (middleExists) {
         lower = middle;
       } else {
         upper = middle;
       }
     }
     return lower;
+  }
+
+  /**
+   * Answers whether a project version exists. Returns undefined only when the
+   * endpoint itself looks unavailable (authentication, throttling, gateway
+   * errors or a missing route), so callers can fall back to a full scan.
+   */
+  private async probeProjectVersion(projectId: string, version: number): Promise<boolean | undefined> {
+    const response = await this.request(
+      `/project/${encodeURIComponent(projectId)}/filetree/diff?from=${encodeURIComponent(String(version))}&to=${encodeURIComponent(String(version))}`,
+    );
+    if (response.ok) {
+      return true;
+    }
+    if (response.status === 404 || response.status === 410 || response.status === 500) {
+      // This ShareLaTeX version reports missing versions as HTTP 500. A truly
+      // missing route is detected by probing the known current version next.
+      return false;
+    }
+    return undefined;
   }
 
   private async getFileTreeDiff(projectId: string, from: number, to: number): Promise<RemoteTreeChange[] | undefined> {
