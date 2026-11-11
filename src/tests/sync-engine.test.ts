@@ -21,6 +21,7 @@ function text(value: Uint8Array): string {
 class MemoryRemote implements ShareLatexRemoteClient {
   readonly files = new Map<string, Uint8Array>();
   private readonly ids = new Map<string, string>();
+  compileResult: CompileResult = { outputFiles: [], raw: { status: "success" } };
 
   constructor(initial: Record<string, string>) {
     for (const [filePath, content] of Object.entries(initial)) {
@@ -69,7 +70,7 @@ class MemoryRemote implements ShareLatexRemoteClient {
   }
 
   async compile(_projectId: string): Promise<CompileResult> {
-    return { outputFiles: [], raw: { status: "success" } };
+    return this.compileResult;
   }
 
   async syncCode(): Promise<unknown> {
@@ -150,6 +151,52 @@ test("skips Git data, ignored paths, and LaTeX build products", async (context) 
   assert.equal(state.files["remote-build.aux"], undefined);
   assert.equal(state.files["ai-output/remote.md"], undefined);
   assert.equal(state.files["private-notes/remote.md"], undefined);
+});
+
+test("publishes the Build ID for the cached compiled PDF", async (context) => {
+  const fixture = await setup({});
+  context.after(() => cleanup(fixture.directory));
+  fixture.remote.compileResult = {
+    pdf: bytes("compiled-pdf"),
+    pdfPath: "output.pdf",
+    buildId: "build-123",
+    outputFiles: [],
+    raw: { status: "success" },
+  };
+
+  const result = await fixture.engine.compile();
+  const status = await fixture.engine.status();
+
+  assert.equal(result.buildId, "build-123");
+  assert.deepEqual(status.latestCompile, {
+    buildId: "build-123",
+    completedAt: status.latestCompile?.completedAt,
+    pdfPath: "output.pdf",
+  });
+  assert.equal(await fs.readFile(path.join(fixture.store.outputDirectory, "output.pdf"), "utf8"), "compiled-pdf");
+});
+
+test("clears a stale Build ID when the replacement PDF has no Build ID", async (context) => {
+  const fixture = await setup({});
+  context.after(() => cleanup(fixture.directory));
+  fixture.remote.compileResult = {
+    pdf: bytes("compiled-pdf-v1"),
+    pdfPath: "output.pdf",
+    buildId: "build-123",
+    outputFiles: [],
+    raw: { status: "success" },
+  };
+  await fixture.engine.compile();
+  fixture.remote.compileResult = {
+    pdf: bytes("compiled-pdf-v2"),
+    pdfPath: "output.pdf",
+    outputFiles: [],
+    raw: { status: "success" },
+  };
+
+  await fixture.engine.compile();
+
+  assert.equal((await fixture.engine.status()).latestCompile, undefined);
 });
 
 test("a local-only edit uploads without downloading the remote file", async (context) => {

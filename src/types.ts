@@ -66,6 +66,11 @@ export interface DaemonStatus {
   project: Pick<SyncConfig, "serverUrl" | "projectId" | "projectName">;
   pendingPaths: string[];
   conflicts: SyncConflict[];
+  latestCompile?: {
+    buildId: string;
+    completedAt: string;
+    pdfPath?: string;
+  };
   lastSyncAt?: string;
   lastError?: string;
 }

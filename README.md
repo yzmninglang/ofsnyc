@@ -68,3 +68,5 @@ npm run dev -- init --server http://your-sharelatex-host:8189 --project-name "My
 ```
 
 The local dashboard is served only on `127.0.0.1` (default `http://127.0.0.1:43821`). It exposes status, manual sync, compile, cached PDF, conflict resolution, and SyncTeX HTTP endpoints for a future VS Code extension.
+
+After a successful remote compile, the compile response and status API include the Build ID associated with the cached PDF. Editor clients should use this Build ID for matching SyncTeX requests rather than keeping a manual value. The value is intentionally in-memory and resets when the daemon restarts, so the next successful compile establishes a fresh PDF/Build ID pair.

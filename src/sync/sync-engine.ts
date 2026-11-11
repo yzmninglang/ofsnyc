@@ -26,6 +26,7 @@ export class SyncEngine extends EventEmitter {
   private watching = false;
   private lastError?: string;
   private lastSyncAt?: string;
+  private latestCompile?: DaemonStatus["latestCompile"];
 
   constructor(
     readonly config: SyncConfig,
@@ -75,14 +76,22 @@ export class SyncEngine extends EventEmitter {
     return this.syncPaths(paths);
   }
 
-  async compile(): Promise<{ pdfPath?: string; outputPath?: string; raw: unknown }> {
+  async compile(): Promise<{ pdfPath?: string; outputPath?: string; buildId?: string; raw: unknown }> {
     const result = await this.client.compile(this.config.projectId);
     if (result.pdf) {
       const outputPath = path.join(this.store.outputDirectory, "output.pdf");
       await this.store.writeFileAtomically(outputPath, result.pdf);
-      return { pdfPath: result.pdfPath, outputPath, raw: result.raw };
+      this.latestCompile = result.buildId
+        ? {
+          buildId: result.buildId,
+          completedAt: new Date().toISOString(),
+          pdfPath: result.pdfPath,
+        }
+        : undefined;
+      this.emitStatus();
+      return { pdfPath: result.pdfPath, outputPath, buildId: result.buildId, raw: result.raw };
     }
-    return { raw: result.raw };
+    return { buildId: result.buildId, raw: result.raw };
   }
 
   async resolveConflict(id: string, choice: "local" | "remote"): Promise<void> {
@@ -167,6 +176,7 @@ export class SyncEngine extends EventEmitter {
       },
       pendingPaths: [...this.pendingPaths].sort(),
       conflicts: await this.store.listConflicts(),
+      latestCompile: this.latestCompile,
       lastSyncAt: this.lastSyncAt,
       lastError: this.lastError,
     };

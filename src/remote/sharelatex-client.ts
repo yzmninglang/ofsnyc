@@ -30,11 +30,22 @@ export interface RemoteChanges {
 export interface CompileResult {
   pdf?: Uint8Array;
   pdfPath?: string;
+  buildId?: string;
   outputFiles: Array<{ type: string; path: string; url: string }>;
   raw: unknown;
 }
 
 export class ShareLatexError extends Error {}
+
+function buildIdFromOutputFiles(outputFiles: Array<{ url: string }>): string | undefined {
+  for (const outputFile of outputFiles) {
+    const match = outputFile.url.match(/\/build\/([^/?/]+)/);
+    if (match?.[1]) {
+      return decodeURIComponent(match[1]);
+    }
+  }
+  return undefined;
+}
 
 const MAX_UPLOAD_RATE_LIMIT_RETRIES = 6;
 const MAX_UPLOAD_RATE_LIMIT_DELAY_MS = 10_000;
@@ -369,7 +380,7 @@ export class ShareLatexClient {
     if (!download.ok) {
       throw new ShareLatexError(`Could not download compiled PDF: HTTP ${download.status}`);
     }
-    return { pdf: new Uint8Array(await download.arrayBuffer()), pdfPath: pdf.path, outputFiles, raw };
+    return { pdf: new Uint8Array(await download.arrayBuffer()), pdfPath: pdf.path, buildId: buildIdFromOutputFiles(outputFiles), outputFiles, raw };
   }
 
   async syncCode(projectId: string, file: string, line: number, column: number, buildId: string): Promise<unknown> {

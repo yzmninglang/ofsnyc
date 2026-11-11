@@ -206,3 +206,36 @@ test("uploads files using the ShareLaTeX multipart contract", async () => {
     assert.equal(tree.files.get("main.tex")?.id, "doc-1");
   });
 });
+
+test("extracts the Build ID for a downloaded compiled PDF", async () => {
+  await withServer(async (request, response) => {
+    const url = new URL(request.url ?? "/", "http://mock.test");
+    if (request.method === "GET" && url.pathname === "/project") {
+      response.writeHead(200, { "Content-Type": "text/html" });
+      response.end(projectDashboard());
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/project/project-1/compile") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        status: "success",
+        outputFiles: [{ type: "pdf", path: "output.pdf", url: "/project/project-1/build/build-123/output/output.pdf" }],
+      }));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/project/project-1/build/build-123/output/output.pdf") {
+      response.writeHead(200, { "Content-Type": "application/pdf" });
+      response.end("compiled-pdf");
+      return;
+    }
+    assert.fail("Unexpected request");
+  }, async (serverUrl) => {
+    const client = new ShareLatexClient(serverUrl, { cookie: "overleaf.sid=browser-session" });
+    await client.authenticate();
+
+    const result = await client.compile("project-1");
+
+    assert.equal(result.buildId, "build-123");
+    assert.equal(new TextDecoder().decode(result.pdf), "compiled-pdf");
+  });
+});
