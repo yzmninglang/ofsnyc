@@ -12,7 +12,7 @@
     "check": "tsc --noEmit -p tsconfig.json",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
-    "test": "npm run build && node --test dist/tests/manager-registry.test.js dist/tests/path-filter.test.js dist/tests/request-logger.test.js dist/tests/reconcile.test.js dist/tests/realtime-tree.test.js dist/tests/remote-monitor.test.js dist/tests/sharelatex-client.test.js dist/tests/state-store.test.js dist/tests/sync-engine.test.js"
+    "test": "npm run build && node --test dist/tests/environment-credentials.test.js dist/tests/manager-registry.test.js dist/tests/manager-server.test.js dist/tests/path-filter.test.js dist/tests/request-logger.test.js dist/tests/reconcile.test.js dist/tests/realtime-tree.test.js dist/tests/remote-monitor.test.js dist/tests/sharelatex-client.test.js dist/tests/state-store.test.js dist/tests/sync-engine.test.js"
   },
   "engines": {
     "node": ">=22.0.0"

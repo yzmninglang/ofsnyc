@@ -6,13 +6,23 @@ import { StateStore } from "../state-store.js";
 import { CompileScheduler } from "../sync/compile-scheduler.js";
 import { ProjectPathFilter } from "../sync/path-filter.js";
 import { SyncEngine } from "../sync/sync-engine.js";
-import type { SyncConfig } from "../types.js";
+import type { DaemonStatus, SyncConfig } from "../types.js";
+import { isControlPath, toLocalPath, toRemotePath } from "../util/paths.js";
 import { LocalWatcher } from "../watcher/local-watcher.js";
 import { RemoteMonitor } from "../watcher/remote-monitor.js";
 import { CredentialStore } from "./credentials.js";
+import { credentialsFromEnvironmentForServer } from "./environment-credentials.js";
 import { ManagerRegistry, newMappingId, type ProjectMapping } from "./registry.js";
 
 export type ManagedPhase = "idle" | "syncing" | "watching" | "error" | "paused" | "awaiting-auth";
+
+/** An error that carries the HTTP status the API should answer with. */
+export class ManagerError extends Error {
+  constructor(message: string, readonly statusCode: number = 400) {
+    super(message);
+    this.name = "ManagerError";
+  }
+}
 
 export interface ManagedProjectStatus {
   id: string;
@@ -93,6 +103,10 @@ export class ProjectManager {
         this.runtimeErrors.set(mapping.id, this.errorMessage(error));
       }
     }
+    // Sessions are restored in the background so an unreachable server cannot
+    // delay the management UI from listening. Mappings that failed their first
+    // start are resumed once a server signs in successfully.
+    void this.signInFromEnvironment();
   }
 
   async connect(serverUrl: string, credentials: ShareLatexCredentials): Promise<ConnectResult> {
@@ -201,8 +215,9 @@ export class ProjectManager {
     await this.registry.save(this.mappings);
   }
 
-  async syncMapping(id: string): Promise<unknown> {
-    return this.requireRuntime(id).engine.syncAll();
+  async syncMapping(id: string, paths?: string[]): Promise<unknown> {
+    const engine = this.requireRuntime(id).engine;
+    return paths === undefined ? engine.syncAll() : engine.syncPaths(paths);
   }
 
   async compileMapping(id: string): Promise<unknown> {
@@ -210,14 +225,103 @@ export class ProjectManager {
   }
 
   async conflictsFor(id: string): Promise<unknown> {
+    return this.storeFor(id).listConflicts();
+  }
+
+  async resolveMappingConflict(id: string, conflictId: string, choice: "local" | "remote"): Promise<void> {
+    await this.requireRuntime(id).engine.resolveConflict(conflictId, choice);
+  }
+
+  async syncCode(id: string, file: string, line: number, column: number, buildId: string): Promise<unknown> {
+    return this.requireRuntime(id).engine.syncCode(file, line, column, buildId);
+  }
+
+  async syncPdf(id: string, page: number, h: number, v: number, buildId: string): Promise<unknown> {
+    return this.requireRuntime(id).engine.syncPdf(page, h, v, buildId);
+  }
+
+  /** Status of one mapping, including the full engine state while it is running. */
+  async projectStatus(id: string): Promise<{ mapping: ManagedProjectStatus; engine?: DaemonStatus }> {
     const mapping = this.requireMapping(id);
     const runtime = this.runtimes.get(id);
-    return runtime ? runtime.store.listConflicts() : new StateStore(mapping.directory).listConflicts();
+    const status = await this.statusFor(mapping);
+    return runtime ? { mapping: status, engine: await runtime.engine.status() } : { mapping: status };
+  }
+
+  /** Reads the cached compile output, if one exists. Works for paused mappings. */
+  async readCompiledPdf(id: string): Promise<Uint8Array | undefined> {
+    return this.readFileIfExists(path.join(this.storeFor(id).outputDirectory, "output.pdf"));
+  }
+
+  /** Reads a file from the project directory. Returns undefined when it does not exist. */
+  async readProjectFile(id: string, relativePath: string): Promise<Uint8Array | undefined> {
+    return this.readFileIfExists(this.localPathFor(id, relativePath));
+  }
+
+  /**
+   * Writes a file inside the project directory. A running mapping's local
+   * watcher picks the change up and uploads it through the normal sync path.
+   */
+  async writeProjectFile(id: string, relativePath: string, content: Uint8Array): Promise<{ path: string }> {
+    const store = this.storeFor(id);
+    const target = this.localPathFor(id, relativePath, store);
+    await store.writeFileAtomically(target, content);
+    return { path: toRemotePath(relativePath) };
   }
 
   async stopAll(): Promise<void> {
     for (const id of [...this.runtimes.keys()]) {
       await this.stopRuntimeById(id);
+    }
+  }
+
+  /**
+   * Signs in to every server that has active mappings, using environment
+   * variables. This makes a restart work without retyping passwords or cookies;
+   * an unavailable or rejected server is reported and simply stays awaiting auth.
+   */
+  private async signInFromEnvironment(): Promise<void> {
+    const servers = [...new Set(
+      this.mappings.filter((mapping) => !mapping.paused).map((mapping) => mapping.serverUrl),
+    )];
+    await Promise.allSettled(servers.map((serverUrl) => this.signInServerFromEnvironment(serverUrl)));
+  }
+
+  private async signInServerFromEnvironment(serverUrl: string): Promise<void> {
+    if (this.credentials.has(serverUrl)) {
+      return;
+    }
+    const config = await this.environmentConfigFor(serverUrl);
+    const credentials = credentialsFromEnvironmentForServer(serverUrl, config);
+    if (!credentials) {
+      return;
+    }
+    try {
+      const client = new ShareLatexClient(normalizeServerUrl(serverUrl), {}, this.requestLogger);
+      await client.authenticate(credentials);
+      this.credentials.set(serverUrl, credentials);
+      await this.resumeServer(serverUrl);
+    } catch (error) {
+      this.options.onError?.(
+        `Could not sign in to ${serverUrl} from environment variables: ${this.errorMessage(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Reads the environment variable names recorded by `ofsync init`, if this
+   * server has a mapping whose directory is already initialized.
+   */
+  private async environmentConfigFor(serverUrl: string): Promise<SyncConfig | undefined> {
+    const mapping = this.mappings.find((item) => item.serverUrl === serverUrl);
+    if (!mapping) {
+      return undefined;
+    }
+    try {
+      return await new StateStore(mapping.directory).loadConfig();
+    } catch {
+      // A missing or unreadable config is reported when the mapping starts.
+      return undefined;
     }
   }
 
@@ -329,18 +433,61 @@ export class ProjectManager {
   private requireMapping(id: string): ProjectMapping {
     const mapping = this.mappings.find((item) => item.id === id);
     if (!mapping) {
-      throw new Error("Unknown project mapping.");
+      throw new ManagerError(`Unknown project mapping: ${id}`, 404);
     }
     return mapping;
   }
 
   private requireRuntime(id: string): ManagedRuntime {
-    this.requireMapping(id);
+    const mapping = this.requireMapping(id);
     const runtime = this.runtimes.get(id);
     if (!runtime) {
-      throw new Error("This mapping is paused. Resume it before syncing.");
+      if (mapping.paused) {
+        throw new ManagerError("This mapping is paused. Resume it before syncing.", 409);
+      }
+      throw new ManagerError(
+        this.runtimeErrors.get(id) ?? "This mapping is not running. Reconnect to the server, then resume it.",
+        409,
+      );
     }
     return runtime;
+  }
+
+  private storeFor(id: string): StateStore {
+    const mapping = this.requireMapping(id);
+    return this.runtimes.get(id)?.store ?? new StateStore(mapping.directory);
+  }
+
+  private localPathFor(id: string, relativePath: string, store?: StateStore): string {
+    const targetStore = store ?? this.storeFor(id);
+    const normalized = toRemotePath(relativePath.trim());
+    // Reject absolute paths and Windows drive letters explicitly: path.resolve
+    // would otherwise silently reinterpret "C:/..." as a relative path.
+    if (
+      !normalized
+      || isControlPath(normalized)
+      || path.posix.isAbsolute(normalized)
+      || path.win32.isAbsolute(normalized)
+      || /^[a-zA-Z]:/.test(normalized)
+    ) {
+      throw new ManagerError(`Invalid project path: ${relativePath}`, 400);
+    }
+    try {
+      return toLocalPath(targetStore.projectDirectory, normalized);
+    } catch (error) {
+      throw new ManagerError(error instanceof Error ? error.message : String(error), 400);
+    }
+  }
+
+  private async readFileIfExists(filePath: string): Promise<Uint8Array | undefined> {
+    try {
+      return await fs.readFile(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return undefined;
+      }
+      throw error;
+    }
   }
 
   private async stopRuntimeById(id: string): Promise<void> {

@@ -35,7 +35,8 @@ function usage(): string {
   ofsync status --path DIRECTORY
   ofsync resolve --path DIRECTORY --id CONFLICT_ID --choice local|remote
 
-Authentication is read only from environment variables. The default cookie variable is OFSYNC_COOKIE.`;
+Authentication is read only from environment variables. The default cookie variable is OFSYNC_COOKIE.
+The manager also signs in from them at startup; per-server variants such as OFSYNC_192_168_1_16_8189_EMAIL take precedence.`;
 }
 
 function parseArguments(argv: string[]): ParsedArguments {

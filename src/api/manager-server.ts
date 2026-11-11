@@ -5,6 +5,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import type { RequestLogger } from "../request-logger.js";
 import type { ProjectManager } from "../manager/project-manager.js";
 import { managerHtml } from "./manager-dashboard.js";
+import { registerProjectRoutes } from "./manager-project-routes.js";
 
 export interface ManagerServerOptions {
   manager: ProjectManager;
@@ -119,6 +120,8 @@ export async function startManagerServer(options: ManagerServerOptions): Promise
     reply.type("text/html; charset=utf-8");
     return managerHtml();
   });
+
+  registerProjectRoutes(app, options.manager);
 
   app.get("/api/manage/health", async () => ({ ok: true }));
 

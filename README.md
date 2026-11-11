@@ -69,6 +69,48 @@ npm run dev -- init --server http://your-sharelatex-host:8189 --project-name "My
 
 The local dashboard is served only on `127.0.0.1` (default `http://127.0.0.1:43821`). It exposes status, manual sync, compile, cached PDF, conflict resolution, and SyncTeX HTTP endpoints for a future VS Code extension.
 
+## Manager API (`ofsync ui`)
+
+`ofsync ui` hosts every mapped project in one process on one port. Project-scoped routes are namespaced by the mapping id from `~/.ofsync/manager.json` (not the remote project id), so PDF, SyncTeX, file, and upload traffic for different projects never collide:
+
+```text
+GET    /api/projects/:pid/status
+GET    /api/projects/:pid/conflicts
+POST   /api/projects/:pid/conflicts/:cid/resolve   { "choice": "local" | "remote" }
+POST   /api/projects/:pid/sync                      optional { "paths": ["main.tex"] }
+POST   /api/projects/:pid/compile
+GET    /api/projects/:pid/pdf
+GET    /api/projects/:pid/file?path=main.tex
+PUT    /api/projects/:pid/file?path=main.tex        raw body
+POST   /api/projects/:pid/synctex/code
+POST   /api/projects/:pid/synctex/pdf
+```
+
+An unknown mapping id returns 404. Paused mappings return 409 for sync, compile, conflict resolution, and SyncTeX, but their cached PDF and local files remain readable. `PUT .../file` writes inside the project directory only (absolute paths, Windows drive letters, `..`, and `.ofsync/` are rejected) and leaves uploading to the normal watcher/reconcile path, so conflict detection and `.gitignore` filtering still apply. The older `/api/manage/mappings/:id/...` routes remain available for the dashboard.
+
+### Automatic sign-in from environment variables
+
+`ofsync ui` signs in to every server that has an active mapping when it starts, so restarting the process (or the computer) does not require retyping credentials:
+
+```powershell
+# email and password (works with self-hosted ShareLaTeX)
+setx OFSYNC_EMAIL 'you@example.com'
+setx OFSYNC_PASSWORD '...'
+
+# or a browser cookie (required for hosted overleaf.com)
+setx OFSYNC_COOKIE 'overleaf_session2=...'
+```
+
+Variable names are resolved per server in this order:
+
+1. `OFSYNC_<HOST>_<PORT>_EMAIL` / `_PASSWORD` / `_COOKIE`, for example `OFSYNC_192_168_1_16_8189_EMAIL`;
+2. the names recorded in the project's `.ofsync/config.json` (from `ofsync init`);
+3. `OFSYNC_EMAIL` / `OFSYNC_PASSWORD` / `OFSYNC_COOKIE`.
+
+A cookie always wins over an email and password. `setx` only affects processes started afterwards, so restart `ofsync ui` after changing a value. A server that cannot be reached or rejects the credentials is reported and stays in `awaiting-auth` without blocking the UI or other projects; `POST /api/manage/connect` remains the manual fallback. ofsync never writes these values itself — they stay visible to other processes running as the same Windows user, so use the per-server names when several servers with different accounts are mapped.
+
+Hosted Overleaf passwords are blocked by reCAPTCHA and its session cookie lasts about five days, so that server needs a fresh `setx OFSYNC_COOKIE` roughly weekly even with automatic sign-in.
+
 Request logging is disabled by default. Add `--request-log` to `watch` or `sync` to write sanitized JSON Lines to `.ofsync/requests.log`. Entries include method, endpoint, status, duration, and errors, but never cookies, passwords, or request bodies. SyncTeX positions without a remote mapping are returned as HTTP 422 with code `SYNCTEX_NOT_FOUND`.
 
 After a successful remote compile, the compile response and status API include the Build ID associated with the cached PDF. Editor clients should use this Build ID for matching SyncTeX requests rather than keeping a manual value. The value is intentionally in-memory and resets when the daemon restarts, so the next successful compile establishes a fresh PDF/Build ID pair.

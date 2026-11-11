@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { StateStore } from "../state-store.js";
 import { SyncEngine } from "../sync/sync-engine.js";
 import { RequestLogger } from "../request-logger.js";
-import { SyncTexNotFoundError } from "../remote/sharelatex-client.js";
+import { sendSyncTexError } from "./synctex-error.js";
 
 export interface LocalServerOptions {
   engine: SyncEngine;
@@ -85,14 +85,6 @@ export async function startLocalServer(options: LocalServerOptions): Promise<Fas
 
   await app.listen({ port: options.port, host: "127.0.0.1" });
   return app;
-}
-
-function sendSyncTexError(reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }, error: unknown): unknown {
-  if (error instanceof SyncTexNotFoundError) {
-    return reply.code(422).send({ error: "No SyncTeX mapping found", code: "SYNCTEX_NOT_FOUND" });
-  }
-  const status = error instanceof Error && "status" in error && typeof error.status === "number" ? error.status : 500;
-  return reply.code(status).send({ error: error instanceof Error ? error.message : String(error), code: "SYNCTEX_REMOTE_ERROR" });
 }
 
 function dashboardHtml(): string {
