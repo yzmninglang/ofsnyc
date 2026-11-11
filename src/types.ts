@@ -34,6 +34,7 @@ export interface SyncConfig {
   propagateDeletes: boolean;
   respectGitignore?: boolean;
   ignorePatterns?: string[];
+  requestLogPath?: string;
 }
 
 export interface FileBaseline {
@@ -71,6 +72,7 @@ export interface DaemonStatus {
     completedAt: string;
     pdfPath?: string;
   };
+  requestLogging?: boolean;
   lastSyncAt?: string;
   lastError?: string;
 }

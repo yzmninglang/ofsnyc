@@ -23,8 +23,8 @@ function usage(): string {
   return `Usage:
   ofsync projects --server URL [--cookie-env NAME] [--email-env NAME --password-env NAME]
   ofsync init --server URL --project-name NAME --path DIRECTORY [--cookie-env NAME] [--email-env NAME --password-env NAME]
-  ofsync sync --path DIRECTORY
-  ofsync watch --path DIRECTORY [--port 43821]
+  ofsync sync --path DIRECTORY [--request-log]
+  ofsync watch --path DIRECTORY [--port 43821] [--request-log]
   ofsync status --path DIRECTORY
   ofsync resolve --path DIRECTORY --id CONFLICT_ID --choice local|remote
 
@@ -122,18 +122,18 @@ async function listProjects(args: ParsedArguments): Promise<void> {
 }
 
 async function synchronize(args: ParsedArguments): Promise<void> {
-  const runtime = await loadRuntime(projectDirectory(args));
+  const runtime = await loadRuntime(projectDirectory(args), args.flags.has("request-log"));
   const summary = await runtime.engine.syncAll();
   console.log(JSON.stringify(summary, null, 2));
 }
 
 async function showStatus(args: ParsedArguments): Promise<void> {
-  const runtime = await loadRuntime(projectDirectory(args));
+  const runtime = await loadRuntime(projectDirectory(args), args.flags.has("request-log"));
   console.log(JSON.stringify(await runtime.engine.status(), null, 2));
 }
 
 async function resolve(args: ParsedArguments): Promise<void> {
-  const runtime = await loadRuntime(projectDirectory(args));
+  const runtime = await loadRuntime(projectDirectory(args), args.flags.has("request-log"));
   const choice = required(args, "choice");
   if (choice !== "local" && choice !== "remote") {
     throw new Error("--choice must be either local or remote");
@@ -143,7 +143,7 @@ async function resolve(args: ParsedArguments): Promise<void> {
 }
 
 async function watchProject(args: ParsedArguments): Promise<void> {
-  const runtime = await loadRuntime(projectDirectory(args));
+  const runtime = await loadRuntime(projectDirectory(args), args.flags.has("request-log"));
   const port = positiveInteger(args.values.get("port") ?? "43821", "port");
   if (port > 65_535) {
     throw new Error("--port must be a valid TCP port");
@@ -164,7 +164,7 @@ async function watchProject(args: ParsedArguments): Promise<void> {
     intervalMs: runtime.config.remotePollIntervalMs,
     onError: logError,
   });
-  const server = await startLocalServer({ engine: runtime.engine, store: runtime.store, port });
+  const server = await startLocalServer({ engine: runtime.engine, store: runtime.store, port, requestLogger: runtime.requestLogger });
   runtime.engine.setWatching(true);
   await runtime.engine.syncAll();
   await localWatcher.start();

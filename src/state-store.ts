@@ -49,6 +49,10 @@ export class StateStore {
     return path.join(this.controlDirectory, "conflicts.json");
   }
 
+  get requestLogPath(): string {
+    return path.join(this.controlDirectory, "requests.log");
+  }
+
   async initialize(config: SyncConfig): Promise<void> {
     const existing = await readJson<SyncConfig | undefined>(this.configPath, undefined);
     if (existing && (existing.serverUrl !== config.serverUrl || existing.projectId !== config.projectId)) {

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { joinProjectRealtime } from "./realtime-tree.js";
 import type { FileKind, ProjectTree, RemoteFile, RemoteFolder } from "../types.js";
+import { RequestLogger, sanitizeRequestUrl } from "../request-logger.js";
 
 export interface ShareLatexCredentials {
   cookie?: string;
@@ -35,7 +36,17 @@ export interface CompileResult {
   raw: unknown;
 }
 
-export class ShareLatexError extends Error {}
+export class ShareLatexError extends Error {
+  constructor(message: string, readonly status?: number) {
+    super(message);
+  }
+}
+
+export class SyncTexNotFoundError extends ShareLatexError {
+  constructor(message = "No SyncTeX mapping found", status?: number) {
+    super(message, status);
+  }
+}
 
 function buildIdFromOutputFiles(outputFiles: Array<{ url: string }>): string | undefined {
   for (const outputFile of outputFiles) {
@@ -156,7 +167,7 @@ export class ShareLatexClient {
   private cookie?: string;
   private csrf?: string;
 
-  constructor(serverUrl: string, credentials: ShareLatexCredentials = {}) {
+  constructor(serverUrl: string, credentials: ShareLatexCredentials = {}, private readonly requestLogger?: RequestLogger) {
     this.serverUrl = normalizeServerUrl(serverUrl);
     this.cookie = credentials.cookie;
   }
@@ -388,7 +399,10 @@ export class ShareLatexClient {
       `/project/${encodeURIComponent(projectId)}/sync/code?file=${encodeURIComponent(file)}&line=${line}&column=${column}&editorId=${randomUUID()}&buildId=${encodeURIComponent(buildId)}`,
     );
     if (!response.ok) {
-      throw new ShareLatexError(`SyncTeX code lookup failed with HTTP ${response.status}`);
+      if (response.status === 500 || response.status === 422) {
+        throw new SyncTexNotFoundError("No SyncTeX mapping found", response.status);
+      }
+      throw new ShareLatexError(`SyncTeX code lookup failed with HTTP ${response.status}`, response.status);
     }
     return response.json();
   }
@@ -398,7 +412,10 @@ export class ShareLatexClient {
       `/project/${encodeURIComponent(projectId)}/sync/pdf?page=${page}&h=${h}&v=${v}&editorId=${randomUUID()}&buildId=${encodeURIComponent(buildId)}`,
     );
     if (!response.ok) {
-      throw new ShareLatexError(`SyncTeX PDF lookup failed with HTTP ${response.status}`);
+      if (response.status === 500 || response.status === 422) {
+        throw new SyncTexNotFoundError("No SyncTeX mapping found", response.status);
+      }
+      throw new ShareLatexError(`SyncTeX PDF lookup failed with HTTP ${response.status}`, response.status);
     }
     return response.json();
   }
@@ -539,9 +556,30 @@ export class ShareLatexClient {
       headers.set("Cookie", this.cookie);
     }
     headers.set("Connection", "keep-alive");
-    const response = await fetch(url, { ...init, headers, redirect: init.redirect ?? "manual" });
-    this.cookie = mergeCookieHeaders(this.cookie, extractCookies(response));
-    return response;
+    const startedAt = Date.now();
+    try {
+      const response = await fetch(url, { ...init, headers, redirect: init.redirect ?? "manual" });
+      this.cookie = mergeCookieHeaders(this.cookie, extractCookies(response));
+      this.requestLogger?.record({
+        at: new Date().toISOString(),
+        scope: "remote",
+        method: init.method ?? "GET",
+        url: sanitizeRequestUrl(url),
+        status: response.status,
+        durationMs: Date.now() - startedAt,
+      });
+      return response;
+    } catch (error) {
+      this.requestLogger?.record({
+        at: new Date().toISOString(),
+        scope: "remote",
+        method: init.method ?? "GET",
+        url: sanitizeRequestUrl(url),
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
   }
 
   private assertAuthenticatedResponse(response: Response, action: string): void {

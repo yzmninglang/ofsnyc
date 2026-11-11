@@ -2,16 +2,33 @@ import { promises as fs } from "node:fs";
 import Fastify, { type FastifyInstance } from "fastify";
 import { StateStore } from "../state-store.js";
 import { SyncEngine } from "../sync/sync-engine.js";
+import { RequestLogger } from "../request-logger.js";
+import { SyncTexNotFoundError } from "../remote/sharelatex-client.js";
 
 export interface LocalServerOptions {
   engine: SyncEngine;
   store: StateStore;
   port: number;
+  requestLogger?: RequestLogger;
 }
 
 export async function startLocalServer(options: LocalServerOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   const { engine, store } = options;
+  const requestStartedAt = new WeakMap<object, number>();
+  app.addHook("onRequest", async (request) => {
+    requestStartedAt.set(request, Date.now());
+  });
+  app.addHook("onResponse", async (request, reply) => {
+    options.requestLogger?.record({
+      at: new Date().toISOString(),
+      scope: "local",
+      method: request.method,
+      url: request.url.split("?", 1)[0],
+      status: reply.statusCode,
+      durationMs: Date.now() - (requestStartedAt.get(request) ?? Date.now()),
+    });
+  });
 
   app.get("/", async (_request, reply) => {
     reply.type("text/html; charset=utf-8");
@@ -48,18 +65,34 @@ export async function startLocalServer(options: LocalServerOptions): Promise<Fas
     if (!file || line === undefined || column === undefined || !buildId) {
       return reply.code(400).send({ error: "file, line, column, and buildId are required." });
     }
-    return engine.syncCode(file, line, column, buildId);
+    try {
+      return await engine.syncCode(file, line, column, buildId);
+    } catch (error) {
+      return sendSyncTexError(reply, error);
+    }
   });
   app.post<{ Body: { page?: number; h?: number; v?: number; buildId?: string } }>("/api/synctex/pdf", async (request, reply) => {
     const { page, h, v, buildId } = request.body ?? {};
     if (page === undefined || h === undefined || v === undefined || !buildId) {
       return reply.code(400).send({ error: "page, h, v, and buildId are required." });
     }
-    return engine.syncPdf(page, h, v, buildId);
+    try {
+      return await engine.syncPdf(page, h, v, buildId);
+    } catch (error) {
+      return sendSyncTexError(reply, error);
+    }
   });
 
   await app.listen({ port: options.port, host: "127.0.0.1" });
   return app;
+}
+
+function sendSyncTexError(reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }, error: unknown): unknown {
+  if (error instanceof SyncTexNotFoundError) {
+    return reply.code(422).send({ error: "No SyncTeX mapping found", code: "SYNCTEX_NOT_FOUND" });
+  }
+  const status = error instanceof Error && "status" in error && typeof error.status === "number" ? error.status : 500;
+  return reply.code(status).send({ error: error instanceof Error ? error.message : String(error), code: "SYNCTEX_REMOTE_ERROR" });
 }
 
 function dashboardHtml(): string {

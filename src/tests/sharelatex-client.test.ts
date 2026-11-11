@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import test from "node:test";
-import { ShareLatexClient } from "../remote/sharelatex-client.js";
+import { ShareLatexClient, SyncTexNotFoundError } from "../remote/sharelatex-client.js";
 import type { ProjectTree } from "../types.js";
 
 async function readBody(request: IncomingMessage): Promise<string> {
@@ -237,5 +237,29 @@ test("extracts the Build ID for a downloaded compiled PDF", async () => {
 
     assert.equal(result.buildId, "build-123");
     assert.equal(new TextDecoder().decode(result.pdf), "compiled-pdf");
+  });
+});
+
+test("normalizes remote SyncTeX misses from HTTP 500 and 422", async () => {
+  await withServer(async (request, response) => {
+    const url = new URL(request.url ?? "/", "http://mock.test");
+    if (request.method === "GET" && url.pathname === "/project") {
+      response.writeHead(200, { "Content-Type": "text/html" });
+      response.end(projectDashboard());
+      return;
+    }
+    if (url.pathname === "/project/project-1/sync/code") {
+      response.writeHead(500);
+      response.end("no mapping");
+      return;
+    }
+    assert.fail("Unexpected request");
+  }, async (serverUrl) => {
+    const client = new ShareLatexClient(serverUrl, { cookie: "overleaf.sid=browser-session" });
+    await client.authenticate();
+    await assert.rejects(
+      () => client.syncCode("project-1", "main.tex", 1, 1, "build-123"),
+      (error: unknown) => error instanceof SyncTexNotFoundError && error.status === 500,
+    );
   });
 });

@@ -177,6 +177,7 @@ export class SyncEngine extends EventEmitter {
       pendingPaths: [...this.pendingPaths].sort(),
       conflicts: await this.store.listConflicts(),
       latestCompile: this.latestCompile,
+      requestLogging: this.config.requestLogPath !== undefined,
       lastSyncAt: this.lastSyncAt,
       lastError: this.lastError,
     };
